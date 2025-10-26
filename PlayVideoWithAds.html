@@ -61,12 +61,11 @@
 
 <div class="player" id="playerWrap">
   <video id="mainVideo" controls preload="metadata" playsinline webkit-playsinline>
-    <source src="Videos/0.mp4" type="video/mp4">
+    <source src="file:///C:/Users/Willanson/Videos/0.mp4" type="video/mp4">
   </video>
 
   <div class="controls-overlay" aria-hidden="false">
 	<button id="skipBtn" class="skip-btn" disabled>Skip in 5s</button>
-    <button id="unmuteBtn" class="skip-btn" style="display:none">Unmute</button>	
     <button id="playPauseBtn" class="skip-btn">Play</button>
     <button id="muteBtn" class="skip-btn">Mute</button>
     <button id="fsToggleBtn" class="skip-btn" >Fullscreen</button>
@@ -90,22 +89,27 @@ const RESUME_OFFSET = 3;
 const SHOW_AD_PLAYLIST = false;
 
 const ads = [
-  { url: "Videos/1.mp4", interruptAt: 5, minPlay: 3 },
-  { url: "Videos/2.mp4", interruptAt: 14, minPlay: 5 },
+  { url: "file:///C:/Users/Willanson/Videos/1.mp4", interruptAt: 5, minPlay: 3 },
+  { url: "file:///C:/Users/Willanson/Videos/2.mp4", interruptAt: 14, minPlay: 5 },
   { url: "https://www.w3schools.com/html/mov_bbb.mp4", interruptAt: 30, minPlay: 5 },
-  { url: "Videos/3.mp4", interruptAt: 44, minPlay: 5 },
+  { url: "file:///C:/Users/Willanson/Videos/3.mp4", interruptAt: 44, minPlay: 5 },
 ];
 
 const mainVideo = document.getElementById('mainVideo');
 const adVideo = document.getElementById('adVideo'); // kept for fallback but not primary ad playback
 const skipBtn = document.getElementById('skipBtn');
-const unmuteBtn = document.getElementById('unmuteBtn');
+//const unmuteBtn = document.getElementById('unmuteBtn');
 const playPauseBtn = document.getElementById('playPauseBtn');
 const muteBtn = document.getElementById('muteBtn');
 const adTableBody = document.querySelector('#adTable tbody');
 const playerWrap = document.getElementById('playerWrap');
 const fsToggleBtn = document.getElementById('fsToggleBtn');
 const exitFsBtn = document.getElementById('exitFsBtn');
+
+// ensure always-visible controls are shown until we explicitly hide them
+if (playPauseBtn) playPauseBtn.style.display = 'inline-block';
+if (muteBtn) muteBtn.style.display = 'inline-block';
+
 
 const originalMainSrc = mainVideo.querySelector('source') ? mainVideo.querySelector('source').src : mainVideo.src;
 
@@ -215,10 +219,6 @@ function startAdTimers(ad){
     // enable skip button and update text
     showSkipUI(true, false, 'Skip ad');
     // ensure unmute button label reflects current mute state
-    if (typeof unmuteBtn !== 'undefined' && unmuteBtn) {
-      unmuteBtn.textContent = mainVideo.muted ? 'Unmute' : 'Mute';
-      unmuteBtn.style.display = 'inline-block';
-    }
     updateCountdownDisplay(0);
   }, ad.minPlay * 1000);
 
@@ -235,7 +235,6 @@ function cleanupAd(){
   clearInterval(countdownInterval);
   showSkipUI(false);
   exitFsBtn.style.display = 'none';
-  unmuteBtn.style.display = 'none';
 
   // restore overlay to original parent if necessary
   if (controlsOverlay.parentElement !== originalOverlayParent) {
@@ -301,6 +300,9 @@ function endAdAndResume(){
     if (controlsOverlay && controlsOverlay.parentElement !== originalOverlayParent) {
       originalOverlayParent.appendChild(controlsOverlay);
     }
+    // restore control visibility
+    if (playPauseBtn) playPauseBtn.style.display = 'inline-block';
+    if (muteBtn) muteBtn.style.display = 'inline-block';
 
     // clear backup and ad state
     delete mainVideo._adBackup;
@@ -325,33 +327,25 @@ playPauseBtn.addEventListener('click', () => {
   }
   syncControlsState();
 });
-
 muteBtn.addEventListener('click', () => {
-  mainVideo.muted = !mainVideo.muted;
-  syncControlsState();
-});
-
-unmuteBtn.addEventListener('click', () => {
-  // This click is considered a user gesture; allow unmute
+  // Treat this as an explicit user gesture
   hadUserGesture = true;
 
-  // Toggle mute
+  // Toggle mute and persist the user's choice for resume/ads
   mainVideo.muted = !mainVideo.muted;
-
-  // Update prevMuted so resume restores user's choice
   prevMuted = mainVideo.muted;
 
-  // Update button label
-  unmuteBtn.textContent = mainVideo.muted ? 'Unmute' : 'Mute';
+  // Update both labels immediately
+  updateMuteButton();
 
-  // If muted state changed to unmuted and video is paused due to autoplay restrictions, try to play
-  if (!mainVideo.muted && mainVideo.paused) {
-    mainVideo.play().catch(()=>{});
-  }
+  // If ad was paused due to autoplay restrictions, try to resume
+  if (!mainVideo.muted && mainVideo.paused) mainVideo.play().catch(()=>{});
 });
 
 function playAd(ad){
+  // debug
   console.log('playAd called', ad);
+
   currentAd = ad;
   currentInterruptPoint = mainVideo.currentTime;
 
@@ -364,17 +358,21 @@ function playAd(ad){
   // Pause & fade current content, and prepare overlay
   mainVideo.pause();
   mainVideo.classList.add('fade-out');
-  
+
   // Show skip UI immediately (disabled until minPlay expires)
   showSkipUI(true, true, `Skip in ${Math.ceil(ad.minPlay)}s`);
 
   attachOverlayToFullscreenTree();
-  
+
+  // make sure primary controls remain visible while ad plays
+  if (muteBtn) muteBtn.style.display = 'inline-block';
+  if (playPauseBtn) playPauseBtn.style.display = 'inline-block';
+
   // If page is currently fullscreen, ensure the overlay is in the visible subtree
   if (document.fullscreenElement === mainVideo || document.fullscreenElement === playerWrap) {
     try { playerWrap.appendChild(controlsOverlay); } catch(e) { /* ignore */ }
   }
-  
+
   setTimeout(() => {
     // Swap source to ad
     if (sourceEl) {
@@ -386,25 +384,32 @@ function playAd(ad){
 
     // ensure overlay is attached to the current fullscreen tree before attempting play
     attachOverlayToFullscreenTree();
-  
+
+    // Capture the gesture and muted state at the moment we prepare the ad
+    const gestureAtStart = hadUserGesture;
+    const prevMutedAtStart = prevMuted;
+
     // Autoplay rules:
-    // - If we have not seen a user gesture, force mute to improve autoplay reliability.
-    // - If the user already interacted, preserve their preference stored in prevMuted.
-    if (!hadUserGesture) {
+    // - If we have not seen a user gesture at start, force mute to improve autoplay reliability.
+    // - If the user already interacted before this point, preserve their preference captured above.
+    if (!gestureAtStart) {
       mainVideo.muted = true;
     } else {
-      mainVideo.muted = prevMuted;
+      mainVideo.muted = prevMutedAtStart;
     }
+
     mainVideo.controls = false;
     mainVideo.load();
     mainVideo.currentTime = 0;
 
     // Attempt to play
     mainVideo.play().then(() => {
-      // If the user already interacted, restore their prior muted state immediately (browser may allow)
+      // After play resolves, apply the CURRENT user preference (not the captured one).
+      // This lets the user click mute/unmute while play() was pending and have that choice respected.
       if (hadUserGesture) {
         mainVideo.muted = prevMuted;
       }
+
       startAdTimers(ad);
       updateMuteButton();
 
@@ -416,7 +421,7 @@ function playAd(ad){
       } else if (document.fullscreenElement === mainVideo) {
         // Do nothing; do not attempt to reroute or exit fullscreen here
       }
-      	  
+
     }).catch(err => {
       // Autoplay blocked: remain muted and rely on user gesture to start/unmute
       console.warn('Ad autoplay failed on mainVideo:', err);
@@ -431,7 +436,11 @@ function playAd(ad){
     mainVideo.classList.add('fade-in');
 
     // Store backup info for resume
-    mainVideo._adBackup = { originalSrcValue, originalControls: prevControls, resumeAt: Math.max(0, (currentInterruptPoint || 0) - RESUME_OFFSET) };
+    mainVideo._adBackup = {
+      originalSrcValue,
+      originalControls: prevControls,
+      resumeAt: Math.max(0, (currentInterruptPoint || 0) - RESUME_OFFSET)
+    };
 
   }, 250);
 }
@@ -451,7 +460,11 @@ document.getElementById('adListContainer').style.display = SHOW_AD_PLAYLIST ? ''
 // Keep labels in sync when video changes state outside our buttons
 mainVideo.addEventListener('play',  syncControlsState);
 mainVideo.addEventListener('pause', syncControlsState);
-mainVideo.addEventListener('volumechange', syncControlsState);
+mainVideo.addEventListener('volumechange', () => {
+  prevMuted = mainVideo.muted;
+  updateMuteButton();
+});
+
 mainVideo.addEventListener('loadedmetadata', syncControlsState);
 mainVideo.addEventListener('ended', () => {
   // After ending, show Play to indicate the next action
@@ -483,8 +496,7 @@ function showSkipUI(show, disabled = true, text = '') {
 }
 // Update mute button label to match current state
 function updateMuteButton() {
-  if (!muteBtn) return;
-  muteBtn.textContent = mainVideo.muted ? 'Unmute' : 'Mute';
+  if (muteBtn) muteBtn.textContent = mainVideo.muted ? 'Unmute' : 'Mute';
 }
 
 // Call once at startup
@@ -509,12 +521,6 @@ exitFsBtn.addEventListener('click', () => {
   }
 });
 
-// Optional: small unmute UI helper (call this where appropriate in your app)
-function showUnmuteButtonIfNeeded() {
-  // If ad is playing and video is muted, show a temporary UI to let user unmute
-  // Implement UI in your HTML and call this to toggle it; code not included by default
-}
-
 function updateCountdownDisplay(remaining){
   if (remaining <= 0) {
     skipBtn.textContent = 'Skip ad';
@@ -534,10 +540,6 @@ function repositionAd(){
   adVideo.style.width = mainVideo.clientWidth + 'px';
   adVideo.style.height = mainVideo.clientHeight + 'px';
 }
-
-// If you want a fallback that uses adVideo when mainVideo cannot swap sources, keep the old adVideo.play() logic
-// but prefer the mainVideo swapping approach for fullscreen reliability.
-// PRIMARY: swap mainVideo.src for ad (works in fullscreen)
 
 </script>
 
