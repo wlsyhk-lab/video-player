@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Video Player</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; margin: 20px; }
+    .player { max-width: 800px; margin-bottom: 12px; position: relative; }
+    video { width: 100%; height: auto; background: #000; display:block; }
+    .controls-overlay { position: absolute; top: 10px; right: 10px; display:flex; gap:8px; z-index: 2000; }
+    .skip-btn { background: rgba(0,0,0,0.6); color: #fff; padding:6px 10px; border-radius:4px; border: none; cursor: pointer; display:none; }
+    .skip-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+    .ad-countdown { color:#fff; background: rgba(0,0,0,0.6); padding:6px 8px; border-radius:4px; display:none; }
+    .ad-list { max-width:800px; margin-top: 18px; border:1px solid #ddd; padding:10px; border-radius:6px; }
+    table { width:100%; border-collapse: collapse; }
+    th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #eee; font-size:14px; }
+    th { background:#fafafa; }
+    .current { background:#fffbe6; }
+    a { color:#006; word-break: break-all; }
+  </style>
+</head>
+<body>
+
+<h2>Auto-play Ads (muted) with minimum skippable duration</h2>
+
+<div class="player" id="playerWrap">
+  <video id="mainVideo" controls preload="metadata">
+   <source src="Videos/0.mp4" type="video/mp4">
+  </video>
+
+  <div class="controls-overlay" aria-hidden="false">
+    <button id="skipBtn" class="skip-btn" disabled>Skip ad</button>
+    <div id="adCountdown" class="ad-countdown"></div>
+  </div>
+</div>
+
+<div class="ad-list" id="adListContainer" style="display:none;">
+  <strong>Ad playlist:</strong>
+  <table id="adTable" aria-label="Ad playlist">
+    <thead><tr><th>#</th><th>Ad URL</th><th>Interrupt @ (s)</th><th>Min ad play (s)</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<!-- Ad video (positioned absolutely over main video when active) -->
+<video id="adVideo" preload="metadata" style="display:none; position:absolute; z-index:1500; background:#000;"></video>
+
+<script>
+const RESUME_OFFSET = 3;
+// Debug: set to true to show ad playlist; set to false to hide it in production
+const SHOW_AD_PLAYLIST = false;
+
+const ads = [
+  { url: "Videos/1.mp4", interruptAt: 5, minPlay: 3 },
+  { url: "Videos/2.mp4", interruptAt: 14, minPlay: 5 },
+  { url: "https://www.w3schools.com/html/mov_bbb.mp4", interruptAt: 30, minPlay: 5 },
+  { url: "Videos/3.mp4", interruptAt: 44, minPlay: 5 },
+];
+
+const mainVideo = document.getElementById('mainVideo');
+const adVideo = document.getElementById('adVideo');
+const skipBtn = document.getElementById('skipBtn');
+const adCountdown = document.getElementById('adCountdown');
+const adTableBody = document.querySelector('#adTable tbody');
+const playerWrap = document.getElementById('playerWrap');
+
+let scheduledAds = ads.slice().sort((a,b)=>a.interruptAt-b.interruptAt);
+let currentAd = null;
+let currentInterruptPoint = null;
+let adStartTimestamp = null;
+let minPlayTimeout = null;
+let countdownInterval = null;
+
+function renderAdTable(){
+  adTableBody.innerHTML = "";
+  scheduledAds.forEach((ad,i)=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${i+1}</td><td><a href="${ad.url}" target="_blank" rel="noopener">${ad.url}</a></td><td>${ad.interruptAt}</td><td>${ad.minPlay}</td>`;
+    adTableBody.appendChild(tr);
+  });
+}
+renderAdTable();
+// Toggle ad playlist visibility based on config
+document.getElementById('adListContainer').style.display = SHOW_AD_PLAYLIST ? '' : 'none';
+
+
+mainVideo.addEventListener('timeupdate', () => {
+  if (currentAd) return;
+  const t = mainVideo.currentTime;
+  for (let i=0;i<scheduledAds.length;i++){
+    const ad = scheduledAds[i];
+    if (t >= ad.interruptAt && t < ad.interruptAt + 0.5) {
+      scheduledAds.splice(i,1);
+      renderAdTable();
+      playAd(ad);
+      break;
+    }
+  }
+});
+
+// Autoplay-friendly: mute ad before play() to satisfy browser autoplay policies
+function playAd(ad){
+  currentAd = ad;
+  currentInterruptPoint = mainVideo.currentTime;
+  mainVideo.pause();
+
+  // position adVideo on top of mainVideo
+  const rect = mainVideo.getBoundingClientRect();
+  adVideo.style.left = rect.left + 'px';
+  adVideo.style.top = rect.top + 'px';
+  adVideo.style.width = mainVideo.clientWidth + 'px';
+  adVideo.style.height = mainVideo.clientHeight + 'px';
+  adVideo.style.display = 'block';
+
+  adVideo.src = ad.url;
+  adVideo.currentTime = 0;
+  adVideo.controls = false;
+
+  // Mute to allow autoplay; if you want sound, set to false only after user interacted.
+  adVideo.muted = true;
+
+  // show controls overlay
+  skipBtn.style.display = 'inline-block';
+  adCountdown.style.display = 'inline-block';
+  skipBtn.disabled = true;
+  adCountdown.textContent = `Skip in ${Math.ceil(ad.minPlay)}s`;
+
+  // Start playback (muted) to satisfy autoplay rules
+  adVideo.play().then(()=> {
+    // If the page has a user gesture (e.g., they clicked play on main video earlier), you can unmute:
+    // Uncomment the next line to unmute when allowed (may still be blocked until user interacts).
+    // adVideo.muted = false;
+
+    adStartTimestamp = Date.now();
+    clearTimeout(minPlayTimeout);
+    minPlayTimeout = setTimeout(()=> {
+      skipBtn.disabled = false;
+      updateCountdownDisplay(0);
+    }, ad.minPlay * 1000);
+
+    clearInterval(countdownInterval);
+    countdownInterval = setInterval(()=> {
+      const elapsed = (Date.now() - adStartTimestamp)/1000;
+      const remaining = Math.max(0, ad.minPlay - elapsed);
+      updateCountdownDisplay(remaining);
+    }, 200);
+
+  }).catch(err => {
+    // If autoplay fails, show a play overlay on ad (not implemented) — fall back to user click to start.
+    console.warn('Ad autoplay failed:', err);
+    // Allow user to start ad by clicking it
+    adVideo.muted = false; // allow user to control sound when they interact
+  });
+
+  adVideo.onended = () => { endAdAndResume(); };
+  adVideo.onerror = () => { endAdAndResume(); };
+}
+
+skipBtn.addEventListener('click', ()=>{
+  if (!currentAd) return;
+  const elapsed = (Date.now() - adStartTimestamp)/1000;
+  if (elapsed < currentAd.minPlay) return;
+  endAdAndResume();
+});
+
+function endAdAndResume(){
+  cleanupAd();
+  resumeMainVideoAfterAd();
+}
+
+function cleanupAd(){
+  try { adVideo.pause(); } catch(e){}
+  adVideo.removeAttribute('src');
+  adVideo.load();
+  adVideo.style.display = 'none';
+  adVideo.muted = false;
+  skipBtn.style.display = 'none';
+  adCountdown.style.display = 'none';
+  skipBtn.disabled = true;
+  adCountdown.textContent = '';
+  clearTimeout(minPlayTimeout);
+  clearInterval(countdownInterval);
+  currentAd = null;
+}
+
+function resumeMainVideoAfterAd(){
+  let resumeAt = Math.max(0, (currentInterruptPoint || 0) - RESUME_OFFSET);
+  if (typeof mainVideo.duration === "number" && !isNaN(mainVideo.duration)) {
+    resumeAt = Math.min(resumeAt, mainVideo.duration - 0.1);
+  }
+  mainVideo.currentTime = resumeAt;
+  mainVideo.play().catch(()=>{});
+  currentInterruptPoint = null;
+}
+
+function updateCountdownDisplay(remaining){
+  if (remaining <= 0) adCountdown.textContent = 'Skip available';
+  else adCountdown.textContent = `Skip available in ${Math.ceil(remaining)}s`;
+}
+
+window.addEventListener('resize', repositionAd);
+window.addEventListener('scroll', repositionAd);
+function repositionAd(){
+  if (adVideo.style.display === 'none') return;
+  const rect = mainVideo.getBoundingClientRect();
+  adVideo.style.left = rect.left + 'px';
+  adVideo.style.top = rect.top + 'px';
+  adVideo.style.width = mainVideo.clientWidth + 'px';
+  adVideo.style.height = mainVideo.clientHeight + 'px';
+}
+</script>
+</body>
+</html>
