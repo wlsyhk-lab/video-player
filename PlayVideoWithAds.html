@@ -8,7 +8,22 @@
     body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; margin: 20px; }
     .player { max-width: 800px; margin-bottom: 12px; position: relative; }
     video { width: 100%; height: auto; background: #000; display:block; }
-    .controls-overlay { position: absolute; top: 10px; right: 10px; display:flex; gap:8px; z-index: 2000; }
+    /*.controls-overlay { position: absolute; top: 10px; right: 10px; display:flex; gap:8px; z-index: 2000; }*/
+    .controls-overlay {
+      pointer-events: auto;
+      position: absolute !important;
+      top: 10px !important;
+      right: 10px !important;
+      left: auto !important;
+      display: flex !important;
+      gap: 8px;
+      z-index: 2000;
+    }
+	
+    /* let JS control FS visibility */
+    #fsToggleBtn { display: inline-block; }
+
+    .controls-overlay .skip-btn { pointer-events: auto; }
     .skip-btn { background: rgba(0,0,0,0.6); color: #fff; padding:6px 10px; border-radius:4px; border: none; cursor: pointer; display:none; }
     .skip-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
     .ad-countdown { color:#fff; background: rgba(0,0,0,0.6); padding:6px 8px; border-radius:4px; display:none; }
@@ -18,6 +33,26 @@
     th { background:#fafafa; }
     .current { background:#fffbe6; }
     a { color:#006; word-break: break-all; }
+	/* Chrome, Edge, Safari */
+	video::-webkit-media-controls-fullscreen-button {
+  	display: none !important;
+	}
+
+	/* Firefox */
+	video::-moz-fullscreen-button {
+	  display: none !important;
+	}
+
+    video.fade-out {
+      opacity: 0;
+      transition: opacity 0.5s ease-out;
+    }
+
+    video.fade-in {
+      opacity: 1;
+      transition: opacity 0.5s ease-in;
+    }
+
   </style>
 </head>
 <body>
@@ -25,13 +60,17 @@
 <h2>Auto-play Ads (muted) with minimum skippable duration</h2>
 
 <div class="player" id="playerWrap">
-  <video id="mainVideo" controls preload="metadata">
-   <source src="Videos/0.mp4" type="video/mp4">
+  <video id="mainVideo" controls preload="metadata" playsinline webkit-playsinline>
+    <source src="Videos/0.mp4" type="video/mp4">
   </video>
 
   <div class="controls-overlay" aria-hidden="false">
-    <button id="skipBtn" class="skip-btn" disabled>Skip ad</button>
-    <div id="adCountdown" class="ad-countdown"></div>
+	<button id="skipBtn" class="skip-btn" disabled>Skip in 5s</button>
+    <button id="unmuteBtn" class="skip-btn" style="display:none">Unmute</button>	
+    <button id="playPauseBtn" class="skip-btn">Play</button>
+    <button id="muteBtn" class="skip-btn">Mute</button>
+    <button id="fsToggleBtn" class="skip-btn" >Fullscreen</button>
+    <button id="exitFsBtn" class="skip-btn" style="display:none">Exit Fullscreen</button>
   </div>
 </div>
 
@@ -43,12 +82,11 @@
   </table>
 </div>
 
-<!-- Ad video (positioned absolutely over main video when active) -->
-<video id="adVideo" preload="metadata" style="display:none; position:absolute; z-index:1500; background:#000;"></video>
+<!-- Ad video (kept for legacy/overlay fallback but not used for primary ad playback) -->
+<video id="adVideo" preload="metadata" style="display:none; position:absolute; z-index:1500; background:#000;" playsinline webkit-playsinline></video>
 
 <script>
 const RESUME_OFFSET = 3;
-// Debug: set to true to show ad playlist; set to false to hide it in production
 const SHOW_AD_PLAYLIST = false;
 
 const ads = [
@@ -59,11 +97,42 @@ const ads = [
 ];
 
 const mainVideo = document.getElementById('mainVideo');
-const adVideo = document.getElementById('adVideo');
+const adVideo = document.getElementById('adVideo'); // kept for fallback but not primary ad playback
 const skipBtn = document.getElementById('skipBtn');
-const adCountdown = document.getElementById('adCountdown');
+const unmuteBtn = document.getElementById('unmuteBtn');
+const playPauseBtn = document.getElementById('playPauseBtn');
+const muteBtn = document.getElementById('muteBtn');
 const adTableBody = document.querySelector('#adTable tbody');
 const playerWrap = document.getElementById('playerWrap');
+const fsToggleBtn = document.getElementById('fsToggleBtn');
+const exitFsBtn = document.getElementById('exitFsBtn');
+
+const originalMainSrc = mainVideo.querySelector('source') ? mainVideo.querySelector('source').src : mainVideo.src;
+
+// overlay and its original parent (declare only once)
+const controlsOverlay = document.querySelector('.controls-overlay');
+const originalOverlayParent = controlsOverlay.parentElement;
+
+// Ensure overlay is attached to wrapper and layout is applied immediately
+if (controlsOverlay && originalOverlayParent && playerWrap) {
+  // move overlay back into wrapper to guarantee correct positioning
+  if (controlsOverlay.parentElement !== playerWrap) {
+    playerWrap.appendChild(controlsOverlay);
+  }
+  // force overlay style (defensive)
+  Object.assign(controlsOverlay.style, {
+    position: 'absolute',
+    top: '10px',
+    right: '10px',
+    left: 'auto',
+    display: 'flex',
+    gap: '8px',
+    zIndex: '2000'
+  });
+}
+
+// Defer initial visibility to the updater so it reflects actual fullscreen state
+if (exitFsBtn) exitFsBtn.style.display = 'none';
 
 let scheduledAds = ads.slice().sort((a,b)=>a.interruptAt-b.interruptAt);
 let currentAd = null;
@@ -72,7 +141,303 @@ let adStartTimestamp = null;
 let minPlayTimeout = null;
 let countdownInterval = null;
 
+// preserve/restore & gesture tracking
+let prevMuted = mainVideo.muted;
+let prevControls = mainVideo.controls;
+let hadUserGesture = false;
+
+function attachOverlayToFullscreenTree() {
+  if (!controlsOverlay) return;
+  const fsEl = document.fullscreenElement;
+
+  // Not fullscreen: restore overlay to original container
+  if (!fsEl) {
+    if (controlsOverlay.parentElement !== originalOverlayParent) {
+      originalOverlayParent.appendChild(controlsOverlay);
+    }
+    Object.assign(controlsOverlay.style, {
+      position: 'absolute',
+      top: '10px',
+      right: '10px',
+      left: 'auto',
+      zIndex: '2000'
+    });
+    // Ensure exit button hidden when not fullscreen
+    exitFsBtn.style.display = 'none';
+    return;
+  }
+
+  // If wrapper is fullscreen, attach overlay to wrapper
+  if (fsEl === playerWrap) {
+    if (controlsOverlay.parentElement !== playerWrap) {
+      playerWrap.appendChild(controlsOverlay);
+    }
+    Object.assign(controlsOverlay.style, {
+      position: 'absolute',
+      top: '10px',
+      right: '10px',
+      left: 'auto',
+      zIndex: '2147483647'
+    });
+    // Ensure exit button shows when wrapper is fullscreen
+    exitFsBtn.style.display = 'inline-block';
+    return;
+  }
+
+  // Other fullscreen targets: leave overlay where it is
+}
+
+function updateFullscreenButtons() {
+  if (!fsToggleBtn || !exitFsBtn) return;
+  const isWrapperFs = (document.fullscreenElement === playerWrap);
+  if (isWrapperFs) {
+    fsToggleBtn.style.display = 'none';
+    exitFsBtn.style.display = 'inline-block';
+  } else {
+    fsToggleBtn.style.display = 'inline-block';
+    exitFsBtn.style.display = 'none';
+  }
+}
+
+// initial UI sync after DOM/setup and after the overlay has been reattached
+attachOverlayToFullscreenTree();
+updateFullscreenButtons();
+
+document.addEventListener('fullscreenchange', () => {
+  attachOverlayToFullscreenTree();
+  updateFullscreenButtons();
+});
+
+function startAdTimers(ad){
+  adStartTimestamp = Date.now();
+  clearTimeout(minPlayTimeout);
+  minPlayTimeout = setTimeout(() => {
+    // enable skip button and update text
+    showSkipUI(true, false, 'Skip ad');
+    // ensure unmute button label reflects current mute state
+    if (typeof unmuteBtn !== 'undefined' && unmuteBtn) {
+      unmuteBtn.textContent = mainVideo.muted ? 'Unmute' : 'Mute';
+      unmuteBtn.style.display = 'inline-block';
+    }
+    updateCountdownDisplay(0);
+  }, ad.minPlay * 1000);
+
+  clearInterval(countdownInterval);
+  countdownInterval = setInterval(() => {
+    const elapsed = (Date.now() - adStartTimestamp)/1000;
+    const remaining = Math.max(0, ad.minPlay - elapsed);
+    updateCountdownDisplay(remaining);
+  }, 200);
+}
+
+function cleanupAd(){
+  clearTimeout(minPlayTimeout);
+  clearInterval(countdownInterval);
+  showSkipUI(false);
+  exitFsBtn.style.display = 'none';
+  unmuteBtn.style.display = 'none';
+
+  // restore overlay to original parent if necessary
+  if (controlsOverlay.parentElement !== originalOverlayParent) {
+    originalOverlayParent.appendChild(controlsOverlay);
+  }
+  adStartTimestamp = null;            // <- clear this so fullscreen handler knows timers ended
+  minPlayTimeout = null;             // <- clear timer reference (used in fullscreen handler logic)
+  currentAd = null;
+  mainVideo.onended = null;
+  mainVideo.onerror = null;
+}
+
+function endAdAndResume(){
+  const backup = mainVideo._adBackup || {};
+  cleanupAd();
+
+  // Pause current playback (ad) and fade
+  mainVideo.pause();
+  mainVideo.classList.add('fade-out');
+
+  setTimeout(() => {
+    // Restore original source
+    const srcEl = mainVideo.querySelector('source');
+    if (srcEl) {
+      const orig = (srcEl.dataset && srcEl.dataset._original) ? srcEl.dataset._original : originalMainSrc;
+      srcEl.src = orig;
+      delete srcEl.dataset._original;
+    } else if (backup.originalSrcValue) {
+      mainVideo.src = backup.originalSrcValue;
+    } else {
+      mainVideo.src = originalMainSrc;
+    }
+
+    // restore element state that may have been changed for the ad
+    mainVideo.load();
+    mainVideo.controls = (backup.originalControls !== undefined) ? backup.originalControls : true;
+    mainVideo.muted = prevMuted;
+
+    // helper to perform seek/resume once metadata is ready
+    const doSeekAndResume = () => {
+      let seekTime = (backup.resumeAt !== undefined) ? backup.resumeAt : Math.max(0, (currentInterruptPoint || 0) - RESUME_OFFSET);
+      if (typeof mainVideo.duration === 'number' && !isNaN(mainVideo.duration)) {
+        seekTime = Math.min(seekTime, mainVideo.duration - 0.1);
+      }
+      mainVideo.currentTime = seekTime;
+      mainVideo.classList.remove('fade-out');
+      mainVideo.classList.add('fade-in');
+      mainVideo.play().catch(()=>{});
+    };
+
+    // If metadata already available, run immediately; otherwise wait for loadedmetadata once.
+    if (mainVideo.readyState >= 1) {
+      doSeekAndResume();
+    } else {
+      const onMeta = () => {
+        mainVideo.removeEventListener('loadedmetadata', onMeta);
+        doSeekAndResume();
+      };
+      mainVideo.addEventListener('loadedmetadata', onMeta);
+    }
+
+    // Restore overlay to its original parent so controls are back in the normal place
+    if (controlsOverlay && controlsOverlay.parentElement !== originalOverlayParent) {
+      originalOverlayParent.appendChild(controlsOverlay);
+    }
+
+    // clear backup and ad state
+    delete mainVideo._adBackup;
+    currentInterruptPoint = null;
+    adStartTimestamp = null;
+    minPlayTimeout = null;
+  }, 250);
+}
+
+// Initialize button labels based on current video state
+function syncControlsState() {
+  playPauseBtn.textContent = mainVideo.paused ? 'Play' : 'Pause';
+  muteBtn.textContent = mainVideo.muted ? 'Unmute' : 'Mute';
+}
+
+// Click handlers
+playPauseBtn.addEventListener('click', () => {
+  if (mainVideo.paused) {
+    mainVideo.play().catch(()=>{});
+  } else {
+    mainVideo.pause();
+  }
+  syncControlsState();
+});
+
+muteBtn.addEventListener('click', () => {
+  mainVideo.muted = !mainVideo.muted;
+  syncControlsState();
+});
+
+unmuteBtn.addEventListener('click', () => {
+  // This click is considered a user gesture; allow unmute
+  hadUserGesture = true;
+
+  // Toggle mute
+  mainVideo.muted = !mainVideo.muted;
+
+  // Update prevMuted so resume restores user's choice
+  prevMuted = mainVideo.muted;
+
+  // Update button label
+  unmuteBtn.textContent = mainVideo.muted ? 'Unmute' : 'Mute';
+
+  // If muted state changed to unmuted and video is paused due to autoplay restrictions, try to play
+  if (!mainVideo.muted && mainVideo.paused) {
+    mainVideo.play().catch(()=>{});
+  }
+});
+
+function playAd(ad){
+  console.log('playAd called', ad);
+  currentAd = ad;
+  currentInterruptPoint = mainVideo.currentTime;
+
+  // Backup original state
+  const sourceEl = mainVideo.querySelector('source');
+  const originalSrcValue = sourceEl ? sourceEl.src : mainVideo.src;
+  prevMuted = mainVideo.muted;
+  prevControls = mainVideo.controls;
+
+  // Pause & fade current content, and prepare overlay
+  mainVideo.pause();
+  mainVideo.classList.add('fade-out');
+  
+  // Show skip UI immediately (disabled until minPlay expires)
+  showSkipUI(true, true, `Skip in ${Math.ceil(ad.minPlay)}s`);
+
+  attachOverlayToFullscreenTree();
+  
+  // If page is currently fullscreen, ensure the overlay is in the visible subtree
+  if (document.fullscreenElement === mainVideo || document.fullscreenElement === playerWrap) {
+    try { playerWrap.appendChild(controlsOverlay); } catch(e) { /* ignore */ }
+  }
+  
+  setTimeout(() => {
+    // Swap source to ad
+    if (sourceEl) {
+      sourceEl.dataset._original = originalSrcValue;
+      sourceEl.src = ad.url;
+    } else {
+      mainVideo.src = ad.url;
+    }
+
+    // ensure overlay is attached to the current fullscreen tree before attempting play
+    attachOverlayToFullscreenTree();
+  
+    // Autoplay rules:
+    // - If we have not seen a user gesture, force mute to improve autoplay reliability.
+    // - If the user already interacted, preserve their preference stored in prevMuted.
+    if (!hadUserGesture) {
+      mainVideo.muted = true;
+    } else {
+      mainVideo.muted = prevMuted;
+    }
+    mainVideo.controls = false;
+    mainVideo.load();
+    mainVideo.currentTime = 0;
+
+    // Attempt to play
+    mainVideo.play().then(() => {
+      // If the user already interacted, restore their prior muted state immediately (browser may allow)
+      if (hadUserGesture) {
+        mainVideo.muted = prevMuted;
+      }
+      startAdTimers(ad);
+      updateMuteButton();
+
+      // If currently in fullscreen, ensure overlay is visible on the wrapper
+      if (document.fullscreenElement === playerWrap) {
+        if (controlsOverlay.parentElement !== playerWrap) {
+          playerWrap.appendChild(controlsOverlay);
+        }
+      } else if (document.fullscreenElement === mainVideo) {
+        // Do nothing; do not attempt to reroute or exit fullscreen here
+      }
+      	  
+    }).catch(err => {
+      // Autoplay blocked: remain muted and rely on user gesture to start/unmute
+      console.warn('Ad autoplay failed on mainVideo:', err);
+      updateMuteButton();
+    });
+
+    // Ensure end/error handlers
+    mainVideo.onended = () => { endAdAndResume(); };
+    mainVideo.onerror = () => { endAdAndResume(); };
+
+    mainVideo.classList.remove('fade-out');
+    mainVideo.classList.add('fade-in');
+
+    // Store backup info for resume
+    mainVideo._adBackup = { originalSrcValue, originalControls: prevControls, resumeAt: Math.max(0, (currentInterruptPoint || 0) - RESUME_OFFSET) };
+
+  }, 250);
+}
+
 function renderAdTable(){
+  if (!adTableBody) return;
   adTableBody.innerHTML = "";
   scheduledAds.forEach((ad,i)=>{
     const tr = document.createElement('tr');
@@ -81,10 +446,17 @@ function renderAdTable(){
   });
 }
 renderAdTable();
-// Toggle ad playlist visibility based on config
 document.getElementById('adListContainer').style.display = SHOW_AD_PLAYLIST ? '' : 'none';
 
-
+// Keep labels in sync when video changes state outside our buttons
+mainVideo.addEventListener('play',  syncControlsState);
+mainVideo.addEventListener('pause', syncControlsState);
+mainVideo.addEventListener('volumechange', syncControlsState);
+mainVideo.addEventListener('loadedmetadata', syncControlsState);
+mainVideo.addEventListener('ended', () => {
+  // After ending, show Play to indicate the next action
+  playPauseBtn.textContent = 'Play';
+});
 mainVideo.addEventListener('timeupdate', () => {
   if (currentAd) return;
   const t = mainVideo.currentTime;
@@ -98,64 +470,25 @@ mainVideo.addEventListener('timeupdate', () => {
     }
   }
 });
-
-// Autoplay-friendly: mute ad before play() to satisfy browser autoplay policies
-function playAd(ad){
-  currentAd = ad;
-  currentInterruptPoint = mainVideo.currentTime;
-  mainVideo.pause();
-
-  // position adVideo on top of mainVideo
-  const rect = mainVideo.getBoundingClientRect();
-  adVideo.style.left = rect.left + 'px';
-  adVideo.style.top = rect.top + 'px';
-  adVideo.style.width = mainVideo.clientWidth + 'px';
-  adVideo.style.height = mainVideo.clientHeight + 'px';
-  adVideo.style.display = 'block';
-
-  adVideo.src = ad.url;
-  adVideo.currentTime = 0;
-  adVideo.controls = false;
-
-  // Mute to allow autoplay; if you want sound, set to false only after user interacted.
-  adVideo.muted = true;
-
-  // show controls overlay
-  skipBtn.style.display = 'inline-block';
-  adCountdown.style.display = 'inline-block';
-  skipBtn.disabled = true;
-  adCountdown.textContent = `Skip in ${Math.ceil(ad.minPlay)}s`;
-
-  // Start playback (muted) to satisfy autoplay rules
-  adVideo.play().then(()=> {
-    // If the page has a user gesture (e.g., they clicked play on main video earlier), you can unmute:
-    // Uncomment the next line to unmute when allowed (may still be blocked until user interacts).
-    // adVideo.muted = false;
-
-    adStartTimestamp = Date.now();
-    clearTimeout(minPlayTimeout);
-    minPlayTimeout = setTimeout(()=> {
-      skipBtn.disabled = false;
-      updateCountdownDisplay(0);
-    }, ad.minPlay * 1000);
-
-    clearInterval(countdownInterval);
-    countdownInterval = setInterval(()=> {
-      const elapsed = (Date.now() - adStartTimestamp)/1000;
-      const remaining = Math.max(0, ad.minPlay - elapsed);
-      updateCountdownDisplay(remaining);
-    }, 200);
-
-  }).catch(err => {
-    // If autoplay fails, show a play overlay on ad (not implemented) — fall back to user click to start.
-    console.warn('Ad autoplay failed:', err);
-    // Allow user to start ad by clicking it
-    adVideo.muted = false; // allow user to control sound when they interact
-  });
-
-  adVideo.onended = () => { endAdAndResume(); };
-  adVideo.onerror = () => { endAdAndResume(); };
+function showSkipUI(show, disabled = true, text = '') {
+  if (show) {
+    skipBtn.style.display = 'inline-block';
+    skipBtn.disabled = !!disabled;
+    skipBtn.textContent = text || skipBtn.textContent || 'Skip ad';
+  } else {
+    skipBtn.style.display = 'none';
+    skipBtn.disabled = true;
+    skipBtn.textContent = '';
+  }
 }
+// Update mute button label to match current state
+function updateMuteButton() {
+  if (!muteBtn) return;
+  muteBtn.textContent = mainVideo.muted ? 'Unmute' : 'Mute';
+}
+
+// Call once at startup
+syncControlsState();
 
 skipBtn.addEventListener('click', ()=>{
   if (!currentAd) return;
@@ -164,41 +497,33 @@ skipBtn.addEventListener('click', ()=>{
   endAdAndResume();
 });
 
-function endAdAndResume(){
-  cleanupAd();
-  resumeMainVideoAfterAd();
-}
-
-function cleanupAd(){
-  try { adVideo.pause(); } catch(e){}
-  adVideo.removeAttribute('src');
-  adVideo.load();
-  adVideo.style.display = 'none';
-  adVideo.muted = false;
-  skipBtn.style.display = 'none';
-  adCountdown.style.display = 'none';
-  skipBtn.disabled = true;
-  adCountdown.textContent = '';
-  clearTimeout(minPlayTimeout);
-  clearInterval(countdownInterval);
-  currentAd = null;
-}
-
-function resumeMainVideoAfterAd(){
-  let resumeAt = Math.max(0, (currentInterruptPoint || 0) - RESUME_OFFSET);
-  if (typeof mainVideo.duration === "number" && !isNaN(mainVideo.duration)) {
-    resumeAt = Math.min(resumeAt, mainVideo.duration - 0.1);
+fsToggleBtn.addEventListener('click', () => {
+  if (!document.fullscreenElement) {
+    playerWrap.requestFullscreen().then(() => updateFullscreenButtons()).catch(()=>{});
   }
-  mainVideo.currentTime = resumeAt;
-  mainVideo.play().catch(()=>{});
-  currentInterruptPoint = null;
+});
+
+exitFsBtn.addEventListener('click', () => {
+  if (document.fullscreenElement) {
+    document.exitFullscreen().then(() => updateFullscreenButtons()).catch(()=>{});
+  }
+});
+
+// Optional: small unmute UI helper (call this where appropriate in your app)
+function showUnmuteButtonIfNeeded() {
+  // If ad is playing and video is muted, show a temporary UI to let user unmute
+  // Implement UI in your HTML and call this to toggle it; code not included by default
 }
 
 function updateCountdownDisplay(remaining){
-  if (remaining <= 0) adCountdown.textContent = 'Skip available';
-  else adCountdown.textContent = `Skip available in ${Math.ceil(remaining)}s`;
+  if (remaining <= 0) {
+    skipBtn.textContent = 'Skip ad';
+  } else {
+    skipBtn.textContent = `Skip in ${Math.ceil(remaining)}s`;
+  }
 }
 
+// Keep adVideo reposition/fallback handling (not primary path when using mainVideo for ads)
 window.addEventListener('resize', repositionAd);
 window.addEventListener('scroll', repositionAd);
 function repositionAd(){
@@ -209,6 +534,12 @@ function repositionAd(){
   adVideo.style.width = mainVideo.clientWidth + 'px';
   adVideo.style.height = mainVideo.clientHeight + 'px';
 }
+
+// If you want a fallback that uses adVideo when mainVideo cannot swap sources, keep the old adVideo.play() logic
+// but prefer the mainVideo swapping approach for fullscreen reliability.
+// PRIMARY: swap mainVideo.src for ad (works in fullscreen)
+
 </script>
+
 </body>
 </html>
